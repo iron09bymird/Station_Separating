@@ -1,0 +1,162 @@
+﻿ORGANIZATION_BLOCK "SCL"
+TITLE = "Main Program Sweep (Cycle)"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_TEMP 
+      Temp_1 : Bool;
+   END_VAR
+
+
+BEGIN
+	// 1. LOGIKA PAMIĘCI AWARII (LATCH)
+	// Jeśli wciśnięto E-Stop, ustawiamy stan awarii. 
+	// Stan ten trwa nawet po wyciśnięciu E-Stop, aż do naciśnięcia Reset.
+	IF NOT "Emergency stop" THEN
+	    "Awaria_Aktywna" := 1;
+	END_IF;
+	
+	IF "Reset" AND "Emergency stop" THEN
+	    "Awaria_Aktywna" := 0; // Kasowanie awarii tylko gdy grzybek jest wyciśnięty
+	END_IF;
+	
+	// 2. LOGIKA PRACY (START/STOP)
+	// System może pracować tylko gdy nie ma aktywnej awarii
+	IF "Start" AND NOT "Awaria_Aktywna" AND "Stop" AND "Emergency stop" THEN
+	    "System_Pracuje" := 1;
+	ELSIF NOT "Stop" OR "Awaria_Aktywna" THEN
+	    "System_Pracuje" := 0;
+	END_IF;
+	
+	// 3. STEROWANIE LAMPKAMI
+	
+	// --- LAMPKA RESET ---
+	IF "Awaria_Aktywna" THEN
+	    "Reset light" := "Clock_1Hz"; // Miga dopóki nie wciśniesz Reset
+	ELSE
+	    "Reset light" := 0;
+	END_IF;
+	
+	// --- LAMPKA START (ZIELONA) ---
+	IF "System_Pracuje" THEN
+	    "Start light" := 1;           // Pali się ciągle podczas pracy
+	ELSIF NOT "Awaria_Aktywna" AND "Emergency stop" AND "Stop" THEN
+	    "Start light" := "Clock_1Hz"; // Miga po Resecie (gotowość do Startu)
+	ELSE
+	    "Start light" := 0;           // Ciemna podczas awarii
+	END_IF;
+	
+	// --- LAMPKA STOP (CZERWONA) ---
+	IF NOT "System_Pracuje" THEN
+	    "Stop light" := 1;
+	ELSE
+	    "Stop light" := 0;
+	END_IF;
+	
+	
+	
+	// 1. DETEKCJA ZBOCZY
+	"F_TRIG_sensor1"(CLK := "Sensor 1");         // Zjazd z sensora zatrzymania T1
+	"F_TRIG_sensor2"(CLK := "Sensor 2");         // Zjazd z sensora zatrzymania T2
+	
+	// Zmiana na F_TRIG dla czujników wyjściowych (zliczanie po przejechaniu elementu)
+	"F_TRIG_puscher1"(CLK:="At pusher 1 exit");
+	"F_TRIG_puscher2"(CLK:="At pusher 2 exit");
+	
+	
+	// 2. OBSŁUGA LICZNIKÓW (Zliczanie na zboczu opadającym)
+	IF "F_TRIG_puscher1".Q THEN
+	    "Counter 1" := "Counter 1" + 1; // Element 4 został poprawnie odrzucony
+	END_IF;
+	
+	IF "F_TRIG_puscher2".Q THEN
+	    "Counter 2":= "Counter 2" + 1; // Element 1 został poprawnie odrzucony
+	END_IF;
+	
+	// Wspólny reset liczników
+	IF "Reset" THEN
+	    "Counter 1" := 0;
+	    "Counter 2" := 0;
+	END_IF;
+	
+	
+	
+	// 3. Rejestracja typów z wizji
+	IF "Vision sensor 1" = 4 THEN
+	    "Pamiec_Typ_4" := 1;
+	END_IF;
+	IF "Vision sensor 2" = 1 THEN
+	    "Pamiec_Typ_1" := 1;
+	END_IF;
+	
+	// 4. Logika pracy sekwencyjnej
+	IF "System_Pracuje" THEN
+	    CASE "state" OF
+	            
+	        0: // --- ETAP 1: PRACA TASMY 1 (Czekanie na 4) ---
+	            "Entry conveyor 1" := 1;
+	            "Conveyor 1" := 1;
+	            "Entry conveyor 2" := 0;
+	            "Conveyor 2" := 0; // Tasma 2 stoi i czeka
+	            "Pusher 1" := 0;
+	            "Pusher 2" := 0;
+	            
+	            // Jeśli wykryto czwórkę na sensorze 1
+	            IF "Pamiec_Typ_4" AND "F_TRIG_sensor1".Q THEN
+	                "Entry conveyor 1" := 0;
+	                "Conveyor 1" := 0;
+	                "state" := 10;
+	            END_IF;
+	            
+	        10: // --- WYPYCHANIE 4 (Z T1 na T2) ---
+	            "Pusher 1" := 1;
+	            IF "Pusher 1 front" THEN
+	                "state" := 11;
+	            END_IF;
+	            
+	        11: // Powrót Pushera 1 i zmiana zmiany
+	            "Pusher 1" := 0;
+	            IF "Pusher 1 back" THEN
+	                "Pamiec_Typ_4" := 0;
+	                "state" := 20; // PRZEKAZANIE PRACY DO TASMY 2
+	            END_IF;
+	            
+	        20: // --- ETAP 2: PRACA TASMY 2 (Czekanie na 1) ---
+	            "Entry conveyor 1" := 0;
+	            "Conveyor 1" := 0; // Tasma 1 teraz stoi i czeka
+	            "Entry conveyor 2" := 1;
+	            "Conveyor 2" := 1; // Tasma 2 rusza
+	            
+	            // Jeśli wykryto jedynkę na sensorze 2
+	            IF "Pamiec_Typ_1" AND "F_TRIG_sensor2".Q THEN
+	                "Entry conveyor 2" := 0;
+	                "Conveyor 2" := 0;
+	                "state" := 30;
+	            END_IF;
+	            
+	        30: // --- WYPYCHANIE 1 (Z T2 na T1) ---
+	            "Pusher 2" := 1;
+	            IF "Pusher 2 front" THEN
+	                "state" := 31;
+	            END_IF;
+	            
+	        31: // Powrót Pushera 2 i powrót do początku
+	            "Pusher 2" := 0;
+	            IF "Pusher 2 back" THEN
+	                "Pamiec_Typ_1" := 0;
+	                "state" := 0; // POWRÓT DO TASMY 1
+	            END_IF;
+	            
+	    END_CASE;
+	ELSE
+	    // STOP
+	    "Entry conveyor 1" := 0;
+	    "Conveyor 1" := 0;
+	    "Entry conveyor 2" := 0;
+	    "Conveyor 2" := 0;
+	    "Pusher 1" := 0;
+	    "Pusher 2" := 0;
+	    "state" := 0;
+	END_IF;
+	
+END_ORGANIZATION_BLOCK
+
